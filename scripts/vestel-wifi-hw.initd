@@ -1,0 +1,155 @@
+#!/sbin/openrc-run
+
+# Qualcomm WCNSS/Pronto Wi-Fi bring-up, modeled on GM8's gm8-wifi-hw.initd
+# (from the GM8 port) but using this device's own
+# confirmed specifics rather than GM8's:
+#
+#  - No /sys/module/firmware_class/parameters/path override: this device's
+#    stock init.target.rc/init.qcom.rc never write to that sysfs file, and
+#    the WCNSS firmware files (WCNSS_cfg.dat, WCNSS_qcom_cfg.ini) live under
+#    /etc/firmware/wlan/prima on the stock system.img itself -- the kernel's
+#    compiled-in default firmware search path already covers that.
+#  - /dev/wcnss_wlan and /dev/wcnss_ctrl are dynamically assigned misc minors
+#    (confirmed via SSH into the live kernel: /sys/class/misc/wcnss_wlan/dev
+#    and .../wcnss_ctrl/dev), not fixed like GM8's -- read them fresh here
+#    and mknod, since this device has no devtmpfs/mdev (see /init).
+#  - Calibration (WCNSS_qcom_wlan_nv.bin) is NOT copied into the image. It
+#    is this specific physical unit's own factory-written blob, confirmed
+#    still present and untouched on its real `persist` GPT partition
+#    (mmcblk0p17 -- NOT p21; an earlier research note claiming p21 was
+#    checked against this unit's actual GPT and was wrong, see README).
+#    persist is mounted read-only here specifically so this bring-up can
+#    never overwrite that irreplaceable per-unit data.
+#  - subsys state path is /sys/devices/fb21b000.qcom,pronto/subsys2/state
+#    (this SoC's own device address; GM8's is a21b000, a different chip
+#    instance address on a different SoC).
+#  - Stock wcnss_service is not run: it is a dynamically linked Bionic
+#    binary needing libcutils/libutils/liblog/libqmi*/libstdc++, none of
+#    which exist in this musl/Alpine userspace, and the QMI libraries talk
+#    to Android's modem IPC stack, which has no equivalent here. A small
+#    custom trigger (vestel-wcnss-trigger, same technique GM8 already
+#    uses) opens /dev/wcnss_wlan and holds it open instead.
+
+description="Vestel Venus 5.5x Qualcomm Pronto Wi-Fi hardware"
+pidfile="/run/vestel-wcnss-trigger.pid"
+
+PRONTO_KO="/lib/modules/vestel-3.4.0/extra/pronto_wlan.ko"
+SUBSYS_STATE="/sys/devices/fb21b000.qcom,pronto/subsys2/state"
+PERSIST_DEV="/dev/mmcblk0p17"
+PERSIST_MNT="/persist"
+# Both paths get the symlink: /lib/firmware is the kernel's actual default
+# direct-lookup path (confirmed via a stuck-request diagnostic -- see
+# README Phase 3 section: firmware placed only under /etc/firmware, which
+# mirrors system.img's internal layout rather than a real absolute path,
+# was not found by the direct in-kernel lookup and fell back to the
+# userspace-firmware-helper mechanism, which hangs forever with no
+# udev/mdev running to service it). /etc/firmware is kept too since that's
+# where the other WCNSS files were extracted to, matching system.img.
+NV_LINK_DIRS="/lib/firmware/wlan/prima /etc/firmware/wlan/prima"
+
+depend() {
+	need localmount
+	use net
+	before wpa_supplicant
+}
+
+_mknod_from_sysfs() {
+	# $1 = /sys/class/misc/<name>/dev  $2 = /dev/<name>
+	local devattr="$1" node="$2" majmin
+	majmin="$(cat "$devattr" 2>/dev/null)" || return 1
+	[ -n "$majmin" ] || return 1
+	rm -f "$node"
+	mknod "$node" c "${majmin%%:*}" "${majmin##*:}" || return 1
+	chmod 0660 "$node"
+}
+
+start() {
+	ebegin "Starting Vestel WCNSS Wi-Fi hardware"
+
+	# This device has no devtmpfs/mdev/udev (see README Phase 2), so the
+	# kernel's classic userspace firmware-loading fallback -- used
+	# whenever request_firmware()'s direct in-kernel search misses --
+	# has nothing to service it and blocks forever, uninterruptibly.
+	# Confirmed root cause of every WCNSS bring-up stall investigated in
+	# Phase 3, not a hardware fault. Start the helper daemon first, and
+	# leave it running (WCNSS may issue more than one firmware request
+	# in sequence: driver config, then wcnss.mdt, then per-segment
+	# wcnss.bNN blobs).
+	if ! pgrep -f /usr/sbin/vestel-fw-helper >/dev/null 2>&1; then
+		start-stop-daemon --start --background \
+			--make-pidfile --pidfile /run/vestel-fw-helper.pid \
+			--exec /usr/sbin/vestel-fw-helper
+	fi
+
+	# Real persist GPT partition, per-unit calibration lives here.
+	# Mounted read-only: nothing this service does should ever need to
+	# write to it, and it cannot be regenerated if corrupted.
+	[ -b "$PERSIST_DEV" ] || mknod "$PERSIST_DEV" b 179 17
+	mkdir -p "$PERSIST_MNT"
+	if ! mountpoint -q "$PERSIST_MNT"; then
+		mount -t ext4 -o ro,nosuid,nodev "$PERSIST_DEV" "$PERSIST_MNT" || {
+			eend 1 "failed to mount persist ($PERSIST_DEV)"
+			return 1
+		}
+	fi
+	if [ ! -e "$PERSIST_MNT/WCNSS_qcom_wlan_nv.bin" ]; then
+		eend 1 "WCNSS_qcom_wlan_nv.bin missing on persist -- refusing to load pronto_wlan without calibration"
+		return 1
+	fi
+	for d in $NV_LINK_DIRS; do
+		mkdir -p "$d"
+		ln -sfn "$PERSIST_MNT/WCNSS_qcom_wlan_nv.bin" "$d/WCNSS_qcom_wlan_nv.bin"
+	done
+
+	_mknod_from_sysfs /sys/class/misc/wcnss_wlan/dev /dev/wcnss_wlan || {
+		eend 1 "wcnss_wlan misc device not found in sysfs"
+		return 1
+	}
+	_mknod_from_sysfs /sys/class/misc/wcnss_ctrl/dev /dev/wcnss_ctrl || {
+		eend 1 "wcnss_ctrl misc device not found in sysfs"
+		return 1
+	}
+
+	start-stop-daemon --start --background --make-pidfile \
+		--pidfile "$pidfile" --exec /usr/sbin/vestel-wcnss-trigger \
+		-- /dev/wcnss_wlan
+
+	# Generous timeout: confirmed via direct observation that once firmware
+	# is actually being fetched/loaded (not just failing a missing-file
+	# check), the WCNSS/Pronto bring-up sequence can legitimately take
+	# 60+ seconds before either succeeding or reporting failure.
+	state=""
+	for _ in $(seq 1 90); do
+		state="$(cat "$SUBSYS_STATE" 2>/dev/null)"
+		[ "$state" = "ONLINE" ] && break
+		sleep 1
+	done
+	if [ "$state" != "ONLINE" ]; then
+		eend 1 "WCNSS did not reach ONLINE state (last seen: '$state')"
+		return 1
+	fi
+
+	if ! grep -q '^pronto_wlan ' /proc/modules 2>/dev/null; then
+		insmod "$PRONTO_KO" || {
+			eend 1 "pronto_wlan.ko failed to load"
+			return 1
+		}
+	fi
+
+	for _ in 1 2 3 4 5 6 7 8 9 10; do
+		[ -e /sys/class/net/wlan0 ] && break
+		sleep 1
+	done
+	ip link set wlan0 up
+	eend $?
+}
+
+stop() {
+	ebegin "Stopping Vestel Wi-Fi hardware"
+	ip link set wlan0 down 2>/dev/null || true
+	rmmod pronto_wlan 2>/dev/null || true
+	start-stop-daemon --stop --pidfile /run/vestel-fw-helper.pid 2>/dev/null || true
+	start-stop-daemon --stop --pidfile "$pidfile" --retry TERM/5/KILL/2
+	umount "$PERSIST_MNT" 2>/dev/null || true
+	eend $?
+}

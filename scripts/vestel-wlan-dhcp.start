@@ -1,0 +1,11 @@
+#!/bin/sh
+# Runs in the "local" OpenRC service (default runlevel), same as
+# vestel-usb-net.start. busybox udhcpc's -b (background) mode retries
+# indefinitely until the interface has a carrier, so this doesn't need to
+# wait on wpa_supplicant's own association timing -- it just keeps trying
+# until wlan0 associates (or forever, harmlessly, if it never does).
+LOG=/var/log/vestel-wlan-dhcp.log
+exec > "$LOG" 2>&1
+echo "=== vestel-wlan-dhcp starting at $(cat /proc/uptime) ==="
+udhcpc -i wlan0 -b -x hostname:vestel-node
+echo "udhcpc -b start rc=$?"

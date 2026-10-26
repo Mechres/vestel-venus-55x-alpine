@@ -1,0 +1,40 @@
+#!/bin/sh
+# Diagnostic inittab action, not PID 1. Install as /sbin/vestel-openrc-trace.
+# Records entry before OpenRC, then flushes progress while a service is stuck.
+case "$1" in sysinit|boot|default) ;; *) exit 2 ;; esac
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+LOG=/var/log/vestel-openrc-trace.log
+mkdir -p /var/log || exit 1
+exec >>"$LOG" 2>&1
+echo "ENTER runlevel=$1 wrapper_pid=$$"
+/bin/busybox sync
+
+# Preserve /run after sysinit; OpenRC handles mounting proc/run itself.
+# A separate short-period flusher makes output from a blocked child readable
+# after reset. The snapshot is bounded and contains no process environments.
+(
+    while /bin/busybox sleep 2; do
+        echo "WATCH runlevel=$1 uptime=$(cat /proc/uptime 2>/dev/null) entropy=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null)"
+        /bin/busybox ps
+        for p in /proc/[0-9]*; do
+            [ -r "$p/comm" ] || continue
+            read -r comm <"$p/comm"
+            case "$comm" in
+                sshd*|ssh-keygen|openrc*|mount|hwclock)
+                    echo "WAIT pid=${p##*/} comm=$comm"
+                    cat "$p/wchan" "$p/syscall" 2>/dev/null
+                    ;;
+            esac
+        done
+        /bin/busybox sync
+    done
+) &
+watch_pid=$!
+trap 'kill "$watch_pid" 2>/dev/null; wait "$watch_pid" 2>/dev/null' EXIT
+
+/sbin/openrc "$1"
+rc=$?
+echo "EXIT runlevel=$1 rc=$rc"
+/bin/busybox sync
+exit "$rc"

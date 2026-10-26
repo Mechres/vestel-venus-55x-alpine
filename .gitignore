@@ -1,0 +1,31 @@
+# Firmware packages, flash images and backups (supply locally)
+*.img
+*.img.*
+*.bin
+*.mbn
+*.mdt
+*.b0[0-9]
+*.tar
+*.tar.*
+*.zip
+backups/
+VSP355*/
+Vestel*/
+scripts/vestel_fw_helper
+scripts/vestel_pmu_poll
+scripts/vestel_wcnss_trigger
+
+# Generated files
+__pycache__/
+*.py[cod]
+*.tmp
+*.bak
+*~
+
+# Private credentials and keys (generate your own)
+*_key
+*_key.pem
+id_rsa
+id_ed25519
+**/authorized_keys
+.env*

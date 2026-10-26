@@ -1,0 +1,7 @@
+# Temporary headless diagnostic inittab. Keep the stock copy for rollback.
+# No gettys: these tests have neither a display nor a terminal login target.
+::sysinit:/sbin/vestel-openrc-trace sysinit
+::sysinit:/sbin/vestel-openrc-trace boot
+::wait:/sbin/vestel-openrc-trace default
+::ctrlaltdel:/sbin/reboot
+::shutdown:/sbin/openrc shutdown

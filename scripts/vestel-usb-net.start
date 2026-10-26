@@ -1,0 +1,51 @@
+#!/bin/sh
+LOG=/var/log/vestel-usb-net.log
+exec > "$LOG" 2>&1
+echo "=== vestel-usb-net starting at $(cat /proc/uptime) ==="
+
+echo "--- before gadget config: /sys/class/net ---"
+ls /sys/class/net
+
+echo 0 > /sys/class/android_usb/android0/enable
+echo "enable=0 rc=$?"
+echo -n "02:11:22:33:44:55" > /sys/class/android_usb/android0/f_rndis/ethaddr
+echo "ethaddr rc=$?"
+echo 18d1 > /sys/class/android_usb/android0/idVendor
+echo "idVendor rc=$?"
+echo 4ee2 > /sys/class/android_usb/android0/idProduct
+echo "idProduct rc=$?"
+echo rndis > /sys/class/android_usb/android0/functions
+echo "functions rc=$?"
+echo 1 > /sys/class/android_usb/android0/enable
+echo "enable=1 rc=$?"
+
+echo "--- retrying interface detection (up to 20 * 500ms = 10s) ---"
+IFACE=""
+i=0
+while [ "$i" -lt 20 ]; do
+  echo "attempt $i: $(ls /sys/class/net)"
+  IFACE=$(ls /sys/class/net | grep -E '^rndis|^usb' | head -1)
+  if [ -n "$IFACE" ]; then
+    echo "found interface: $IFACE"
+    break
+  fi
+  i=$((i + 1))
+  sleep 0.5
+done
+
+if [ -n "$IFACE" ]; then
+  echo "--- configuring $IFACE ---"
+  ip addr add 172.16.42.1/24 dev "$IFACE"
+  echo "ip addr add rc=$?"
+  ip link set "$IFACE" up
+  echo "ip link set up rc=$?"
+  echo "--- final state ---"
+  ip addr show dev "$IFACE"
+else
+  echo "NO INTERFACE APPEARED after retries"
+  echo "--- android_usb state dump ---"
+  cat /sys/class/android_usb/android0/state 2>&1
+  cat /sys/class/android_usb/android0/functions 2>&1
+fi
+
+echo "=== vestel-usb-net finished at $(cat /proc/uptime) ==="

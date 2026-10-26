@@ -1,0 +1,26 @@
+#!/sbin/openrc-run
+# Mounts devpts. This device has no mdev/udev (see README Phase 2 --
+# devfs's "mount -t devtmpfs" fails on this kernel and was removed
+# entirely), so nothing else ever mounts /dev/pts. Without it, /dev/ptmx
+# exists (created by /init) but PTY slave devices never appear, so any
+# interactive SSH session fails with "PTY allocation request failed" /
+# "shell request failed" even though key-based auth succeeds fine --
+# every SSH use up to this point had been non-interactive (a remote
+# command, not a login shell), which doesn't need a PTY at all.
+#
+# Runs in the `boot` runlevel specifically so it's guaranteed to finish
+# before dropbear (in `default`) ever accepts a connection.
+
+description="Mount devpts for PTY allocation (no mdev/udev on this device)"
+
+depend() {
+	need localmount
+	before dropbear
+}
+
+start() {
+	ebegin "Mounting devpts"
+	mkdir -p /dev/pts
+	mountpoint -q /dev/pts || mount -t devpts -o gid=5,mode=0620 devpts /dev/pts
+	eend $?
+}
